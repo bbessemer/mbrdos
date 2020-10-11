@@ -8,10 +8,9 @@
     bits 16
     cpu 8086
 
-    org 0x600
-
     section .text
 
+    global _start
 _start:
     cli
     xor     ax, ax
@@ -107,10 +106,6 @@ vga_print:
 
 hello:
     db "Hello, world!", 0
-
-    times 510-($-$$) db 0
-    db 0x55
-    db 0xaa
 
     section .bss
 __bss_start:
