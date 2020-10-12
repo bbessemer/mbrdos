@@ -39,69 +39,71 @@ _start:
     rep     stosb
 
     mov     si, hello
-    mov     ah, 0x07
-    call    vga_print
+    call    serial_send
 
 halt:
     hlt
     jmp     halt
 
-vga_print:
-    push    bx                  ; Will store line number
-    push    cx                  ; Will store columns remaining
+
+;;; SERIAL I/O
+
+%define SERIAL(n)   (0x3f8 + n)
+
+serial_sendchar:
     push    dx
-    mov     bx, [vga_line]
-    mov     cx, 80
-    sub     cx, [vga_col]
-    mov     dx, 0xb800
-    mov     es, dx
-.outer_loop:
     push    ax
-    mov     ax, bx
-    inc     ax
-    mul     byte [.eighty]
-    sub     ax, cx
-    mov     di, ax
+    mov     dx, SERIAL(5)
+.wait_thre:
+    in      al, dx
+    test    al, 0x20
+    jz      .wait_thre
     pop     ax
-.inner_loop:
+    mov     dx, SERIAL(0)
+    out     dx, al
+    pop     dx
+    ret
+
+serial_send:
     lodsb
     test    al, al
     jz      .end
-    cmp     al, `\n`
-    je      .newline
-    stosw
+    call    serial_sendchar
     dec     cx
-    jmp     .inner_loop
-.eighty:
-    db      80
-.newline:
-    xor     cx, cx
-    inc     bx
-    cmp     bx, 25
-    jb      .outer_loop
-.scroll:
-    push    ds
-    push    si
-    mov     si, es
-    mov     ds, si
-    mov     si, 80
-    xor     di, di
-    mov     cx, 80*24
-    rep     movsw
-    mov     cx, 80
-    xor     al, al
-    rep     stosw
-    pop     si
-    pop     ds
-    dec     bx
-    jmp     .outer_loop
+    jnz     serial_send
 .end:
-    mov     word [vga_line], bx
-    mov     word [vga_col], 80
-    sub     word [vga_col], cx
+    ret
+
+serial_recvchar:
+    push    dx
+    mov     dx, SERIAL(5)
+.wait_dr:
+    in      al, dx
+    test    al, 1
+    jz      .wait_dr
+    mov     dx, SERIAL(0)
+    in      al, dx
     pop     dx
-    pop     cx
-    pop     bx
+    ret
+
+serial_recv:
+    push    ax
+    push    cx
+.loop:
+    call    serial_recvchar
+    cmp     al, `\r`
+    je      .loop               ; CR is completely ignored
+    cmp     al, `\n`
+    je      .end
+    stosb
+    dec     cx
+    jnz     .loop
+.end:
+    pop     ax                  ; Original max count
+    neg     cx                  ; cx = -(remaining count)
+    add     cx, ax              ; cx = count actually read
+    mov     byte [di], 0        ; null terminator
+    pop     ax
     ret
 
 hello:
@@ -109,8 +111,5 @@ hello:
 
     section .bss
 __bss_start:
-
-vga_line:   resw 1
-vga_col:    resw 1
 
 __bss_end:
