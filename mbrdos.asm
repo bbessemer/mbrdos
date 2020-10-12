@@ -1,5 +1,5 @@
 ;;;
-; MBRDOS - an x86 real-mode OS that fits into a 512-byte bootsector.
+; MBR-DOS - an x86 real-mode OS that fits into a 512-byte bootsector.
 ;
 ; This is free and unencumbered software released into the public domain.
 ; Written 2020 by Brent Bessemer.
@@ -7,6 +7,8 @@
 
     bits 16
     cpu 8086
+
+    org 0x600
 
     section .text
 
@@ -38,7 +40,7 @@ _start:
     xor     al, al
     rep     stosb
 
-    mov     si, hello
+    mov     si, welcome
     call    serial_send
 
 halt:
@@ -50,6 +52,8 @@ halt:
 
 %define SERIAL(n)   (0x3f8 + n)
 
+;;; Send a single character over the default serial port.
+;;; Inputs: character to send in al.
 serial_sendchar:
     push    dx
     push    ax
@@ -64,6 +68,11 @@ serial_sendchar:
     pop     dx
     ret
 
+;;; Send a string over the default serial port.
+;;; String terminated by either null byte or specified limit.
+;;;
+;;; Inputs: address of string in si
+;;;         maximum length to send in cx
 serial_send:
     lodsb
     test    al, al
@@ -74,6 +83,8 @@ serial_send:
 .end:
     ret
 
+;;; Recieve a single character over the default serial port.
+;;; Outputs: character received in al
 serial_recvchar:
     push    dx
     mov     dx, SERIAL(5)
@@ -86,6 +97,12 @@ serial_recvchar:
     pop     dx
     ret
 
+;;; Recieve a string over the default serial port.
+;;; String terminated by either newline or specified limit.
+;;; A null byte is written either way.
+;;;
+;;; Inputs: address to write string to in di
+;;; Outputs: number of characters actually read (not counting null) in cx
 serial_recv:
     push    ax
     push    cx
@@ -106,8 +123,23 @@ serial_recv:
     pop     ax
     ret
 
-hello:
-    db "Hello, world!", 0
+;;; FLOPPY DISK DRIVER
+
+    ;; TODO
+
+;;; FAT16 DRIVER
+
+    ;; TODO
+
+;;; DATA
+
+welcome: db `Welcome to MBR-DOS v0.1.0\r\n`, 0
+
+;;; MBR PADDING AND SIGNATURE
+
+    times 510-($-$$) db 0
+    db 0x55
+    db 0xaa
 
     section .bss
 __bss_start:

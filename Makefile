@@ -1,8 +1,14 @@
+###
+# Makefile for MBR-DOS
+#
+# This is free and unencumbered software released into the public domain.
+# Written 2020 by Brent Bessemer.
+###
 
-all: mbrdos
+all: mbrdos.com
 
-mbrdos: mbrdos.o
-	ld -m elf_i386 -T link.ld $^ -o $@
+%.com: %.asm
+	nasm -f bin $< -o $@
 
-%.o: %.asm
-	nasm -f elf32 $< -o $@
+clean:
+	rm -rvf *.com
