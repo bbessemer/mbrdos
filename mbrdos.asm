@@ -125,7 +125,99 @@ serial_recv:
 
 ;;; FLOPPY DISK DRIVER
 
-    ;; TODO
+%define HEADS       2
+%define CYLINDERS   80
+%define SPC         18
+
+;;; Convert logical block address to cylinder/head/sector address.
+;;; Since this is a floppy, we can assume that the cylinder number fits into
+;;; one byte and doesn't require storing the high bits in other registers.
+;;;
+;;; Inputs: LBA in ax
+;;; Outputs: cylinder in ch
+;;;          head in dh
+;;;          sector in cl
+lba2chs:
+    push    dx
+    mov     cl, SPC
+    div     cl                  ; ah = sector
+    mov     dl, ah
+    xor     ah, ah
+    mov     cl, HEADS
+    div     cl                  ; ah = cylinder; al = head
+    pop     dx
+    mov     ch, ah
+    mov     dh, al
+    mov     cl, dl
+    ret
+
+;;; Read several sectors from the first floppy disk.
+;;;
+;;; See below for inputs and outputs. This function additionally
+;;; takes the number of sectors to read in cx.
+read_sectors:
+    call    read_sector
+    test    ax, ax              ; nonzero = failure, pass it on
+    jnz     .end
+    dec     cx
+    jnz     read_sectors
+.end:
+    ret
+
+;;; Read a single sector from the first floppy disk.
+;;;
+;;; Inputs: LBA of sector to read in ax
+;;;         Destination buffer at [es:di]
+;;; Outputs: ax = 0 on success, != 0 on failure
+read_sector:
+    push    bx
+    push    cx
+    mov     bx, di
+    call    lba2chs
+    mov     ax, 0x0201          ; ah = function (read); al = # of sectors
+    jmp     floppy_common
+
+;;; Write several sectors to the first floppy disk.
+;;;
+;;; See below for inputs and outputs. This function additionally
+;;; takes the number of sectors to write in cx.
+write_sectors:
+    call    write_sector
+    test    ax, ax              ; nonzero = failure, pass it on
+    jnz     .end
+    dec     cx
+    jnz     write_sectors
+.end:
+    ret
+
+;;; Write a single sector to the first floppy disk.
+;;;
+;;; Inputs: LBA of sector to write to in ax
+;;;         Source buffer at [ds:si]
+;;; Outputs: ax = 0 on success, != 0 on failure
+write_sector:
+    push    bx
+    push    cx
+    mov     bx, ds
+    mov     es, bx
+    mov     bx, si
+    call    lba2chs
+    mov     ax, 0x0301          ; ah = function (write); al = # of sectors
+    ;; FALLTHRU
+
+floppy_common:
+    xor     dl, dl              ; drive number = 0 (first floppy)
+    int     0x13                ; BIOS interrupt
+    jc      .error              ; BIOS reports error with carry flag
+    test    al, al              ; BIOS returns number of sectors actually read
+    mov     al, 0
+    jnz     .success
+.error:
+    inc     al
+.success:
+    pop     cx                  ; Were pushed in read_ or write_ functions
+    pop     bx
+    ret
 
 ;;; FAT16 DRIVER
 
