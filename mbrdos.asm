@@ -26,7 +26,7 @@ bpb:
     .sectors_per_fat:       dw  0
     .sectors_per_track:     dw  0
     .num_heads:             dw  0
-    .num_hidden_sectors:    dd  0
+    .hidden_sectors:        dd  0
     .large_sector_count:    dd  0
     .drive_number:          db  0
     .nt_flags:              db  0
@@ -203,37 +203,7 @@ read_sector:
     mov     bx, di
     call    lba2chs
     mov     ax, 0x0201          ; ah = function (read); al = # of sectors
-    jmp     floppy_common
 
-;;; Write several sectors to the first floppy disk.
-;;;
-;;; See below for inputs and outputs. This function additionally
-;;; takes the number of sectors to write in cx.
-write_sectors:
-    call    write_sector
-    test    ax, ax              ; nonzero = failure, pass it on
-    jnz     .end
-    dec     cx
-    jnz     write_sectors
-.end:
-    ret
-
-;;; Write a single sector to the first floppy disk.
-;;;
-;;; Inputs: LBA of sector to write to in ax
-;;;         Source buffer at [ds:si]
-;;; Outputs: ax = 0 on success, != 0 on failure
-write_sector:
-    push    bx
-    push    cx
-    mov     bx, ds
-    mov     es, bx
-    mov     bx, si
-    call    lba2chs
-    mov     ax, 0x0301          ; ah = function (write); al = # of sectors
-    ;; FALLTHRU
-
-floppy_common:
     xor     dl, dl              ; drive number = 0 (first floppy)
     int     0x13                ; BIOS interrupt
     jc      .error              ; BIOS reports error with carry flag
@@ -249,7 +219,111 @@ floppy_common:
 
 ;;; FAT12 DRIVER
 
-    ;; TODO
+    struc   fatfile
+fat_size:   resw 1
+fat_pos:    resw 1
+fat_sclus:  resw 1
+fat_cclus:  resw 1
+    endstruc
+
+;;; Read bytes from a FAT file.
+;;;
+;;; Inputs:  pointer to fatfile structure in bx
+;;;          number of bytes to read in cx
+;;;          destination buffer at [es:di]
+;;; Outputs: ax = 0 on success, 1 on disk failure
+;;;          cx = number of bytes actually read
+fat_read:
+    push    ax                  ; 1
+    push    dx                  ; 2
+    push    si                  ; 3
+
+    ;; Compute the number of bytes per cluster.
+    ;; TODO: maybe we should hardcode these to save instructions?
+    xor     ah, ah
+    mov     al, byte [bpb.sectors_per_cluster]
+    mul     word [bpb.bytes_per_sector]
+
+    ;; Compute the current offset into the current cluster
+    push    cx                  ; 4
+    mov     cx, ax
+    mov     ax, [bx+fat_pos]
+    div     cx
+    mov     si, dx
+
+    ;; Convert the bytes into full clusters and remaining bytes.
+    pop     ax                  ; 3 - Argument originally passed in cx
+    xor     dx, dx
+    div     cx
+    push    dx                  ; 4
+    mov     cx, ax
+
+    mov     ax, [bx+fat_cclus]
+
+;;; ax = number of cluster to read
+;;; cx = number of clusters remaining
+;;; si = byte offset into cluster to start reading
+.read_cluster:
+    test    cx, cx
+    jz      .read_last_cluster
+
+    ;; Compute the sector offset into the current cluster
+    ;; and byte offset into that sector.
+    push    ax                  ; 5
+    mov     ax, si
+    xor     dx, dx
+    div     word [bpb.bytes_per_sector]
+    mov     si, dx
+    mov     dx, ax
+
+    ;; Convert cluster number + offset to (LBA) sector number
+    ;; dx = offset in sectors
+    pop     ax                  ; 4 - Cluster number
+    push    ax                  ; 5
+    push    dx                  ; 6
+    mul     word [bpb.sectors_per_cluster]
+    pop     dx                  ; 5
+    add     ax, [bpb.reserved_sectors]
+    ;; add     ax, [bpb.hidden_sectors]
+    add     ax, dx
+
+    ;; Compute number of sectors to read.
+    push    cx                  ; 6
+    mov     cx, [bpb.sectors_per_cluster]
+    sub     cx, dx
+
+.read_sector:
+    ;; Read whole sector into temporary buffer
+    push    es                  ; 7
+    push    di                  ; 8
+    xor     di, di
+    mov     es, di
+    mov     di, sector_buf
+    call    read_sector
+    pop     di                  ; 7
+    pop     es                  ; 6
+
+    ;; Copy from temporary buffer into destination, w/ byte offset
+    push    cx                  ; 7
+    add     si, sector_buf
+    mov     cx, sector_buf + 512
+    sub     cx, si
+    rep     movsb
+    pop     cx                  ; 6
+
+    ;; Prepare for next iteration of inner (sector) loop
+    xor     si, si              ; On subsequent sectors, offset will def be 0
+    dec     cx
+    jnz     .read_sector
+
+    ;; Prepare for next iteration of outer (cluster) loop
+    pop     cx                  ; 5 - Number of clusters remaining
+    pop     ax                  ; 4 - Cluster number
+    call    fat_next_cluster
+    dec     cx
+    jmp     .read_cluster
+
+.read_last_cluster:
 
 ;;; DATA
 
@@ -265,5 +339,7 @@ welcome:
 
     section .bss
 __bss_start:
+
+sector_buf: resb 512
 
 __bss_end:
