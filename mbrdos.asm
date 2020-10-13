@@ -12,6 +12,29 @@
 
     section .text
 
+bpb:
+    jmp     _start
+    nop
+    .oem_id:                dq  0
+    .bytes_per_sector:      dw  0
+    .sectors_per_cluster:   db  0
+    .reserved_sectors:      dw  0
+    .num_fats:              db  0
+    .rootdir_entries:       dw  0
+    .total_sectors:         dw  0
+    .media_desc_type:       db  0
+    .sectors_per_fat:       dw  0
+    .sectors_per_track:     dw  0
+    .num_heads:             dw  0
+    .num_hidden_sectors:    dd  0
+    .large_sector_count:    dd  0
+    .drive_number:          db  0
+    .nt_flags:              db  0
+    .signature:             db  0
+    .volume_id:             dd  0
+    .volume_label: times 11 db  0
+    .system_id:             dq  0
+
     global _start
 _start:
     cli
@@ -26,15 +49,16 @@ _start:
     call    .testaddr
 .testaddr:
     pop     si
-    sub     si, (.testaddr - _start)
+    sub     si, (.testaddr - bpb)
     push    ds
     mov     ax, cs
     mov     ds, ax
-    mov     di, _start
+    mov     di, bpb
     mov     cx, 512
     rep     movsb
+    jmp     0x0:.zero_bss
 
-    ;; Zero the BSS section
+.zero_bss:
     mov     di, __bss_start
     mov     cx, (__bss_end - __bss_start)
     xor     al, al
@@ -219,7 +243,7 @@ floppy_common:
     pop     bx
     ret
 
-;;; FAT16 DRIVER
+;;; FAT12 DRIVER
 
     ;; TODO
 
