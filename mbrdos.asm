@@ -213,7 +213,7 @@ read_sector:
 .error:
     inc     al
 .success:
-    pop     cx                  ; Were pushed in read_ or write_ functions
+    pop     cx
     pop     bx
     ret
 
@@ -267,6 +267,18 @@ fat_read:
     test    cx, cx
     jz      .read_last_cluster
 
+    call    fat_read_cluster
+
+    ;; Prepare for next iteration of outer (cluster) loop
+    pop     cx                  ; 5 - Number of clusters remaining
+    pop     ax                  ; 4 - Cluster number
+    call    fat_next_cluster
+    dec     cx
+    jmp     .read_cluster
+
+.read_last_cluster:
+
+fat_read_cluster:
     ;; Compute the sector offset into the current cluster
     ;; and byte offset into that sector.
     push    ax                  ; 5
@@ -293,6 +305,14 @@ fat_read:
     sub     cx, dx
 
 .read_sector:
+    call    fat_read_sector
+
+    xor     si, si              ; On subsequent sectors, offset will def be 0
+    dec     cx
+    jnz     .read_sector
+    ret
+
+fat_read_sector:
     ;; Read whole sector into temporary buffer
     push    es                  ; 7
     push    di                  ; 8
@@ -310,20 +330,10 @@ fat_read:
     sub     cx, si
     rep     movsb
     pop     cx                  ; 6
+    ret
 
-    ;; Prepare for next iteration of inner (sector) loop
-    xor     si, si              ; On subsequent sectors, offset will def be 0
-    dec     cx
-    jnz     .read_sector
-
-    ;; Prepare for next iteration of outer (cluster) loop
-    pop     cx                  ; 5 - Number of clusters remaining
-    pop     ax                  ; 4 - Cluster number
-    call    fat_next_cluster
-    dec     cx
-    jmp     .read_cluster
-
-.read_last_cluster:
+fat_next_cluster:
+    ret
 
 ;;; DATA
 
