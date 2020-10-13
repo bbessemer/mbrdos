@@ -65,6 +65,7 @@ _start:
     rep     stosb
 
     mov     si, welcome
+    mov     cx, welcome.end - welcome
     call    serial_send
 
 halt:
@@ -79,6 +80,12 @@ halt:
 ;;; Send a single character over the default serial port.
 ;;; Inputs: character to send in al.
 serial_sendchar:
+    cmp     al, `\n`
+    jne     .not_newline
+    mov     al, `\r`
+    call    .not_newline
+    mov     al, `\n`
+.not_newline:
     push    dx
     push    ax
     mov     dx, SERIAL(5)
@@ -93,14 +100,11 @@ serial_sendchar:
     ret
 
 ;;; Send a string over the default serial port.
-;;; String terminated by either null byte or specified limit.
 ;;;
 ;;; Inputs: address of string in si
-;;;         maximum length to send in cx
+;;;         length to send in cx
 serial_send:
     lodsb
-    test    al, al
-    jz      .end
     call    serial_sendchar
     dec     cx
     jnz     serial_send
@@ -249,7 +253,9 @@ floppy_common:
 
 ;;; DATA
 
-welcome: db `Welcome to MBR-DOS v0.1.0\r\n`, 0
+welcome:
+    db `Welcome to MBR-DOS v0.1.0\n`
+.end:
 
 ;;; MBR PADDING AND SIGNATURE
 
