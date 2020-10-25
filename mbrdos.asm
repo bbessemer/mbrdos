@@ -15,25 +15,25 @@
 bpb:
     jmp     _start
     nop
-    .oem_id:                dq  0
-    .bytes_per_sector:      dw  0
-    .sectors_per_cluster:   db  0
-    .reserved_sectors:      dw  0
-    .num_fats:              db  0
-    .rootdir_entries:       dw  0
-    .total_sectors:         dw  0
-    .media_desc_type:       db  0
-    .sectors_per_fat:       dw  0
-    .sectors_per_track:     dw  0
-    .num_heads:             dw  0
+    .oem_id:                db  "MBRDOS01"
+    .bytes_per_sector:      dw  512
+    .sectors_per_cluster:   db  1
+    .reserved_sectors:      dw  1
+    .num_fats:              db  2
+    .rootdir_entries:       dw  0xe0
+    .total_sectors:         dw  2880
+    .media_desc_type:       db  0xf0
+    .sectors_per_fat:       dw  9
+    .sectors_per_track:     dw  18
+    .num_heads:             dw  2
     .hidden_sectors:        dd  0
     .large_sector_count:    dd  0
     .drive_number:          db  0
     .nt_flags:              db  0
-    .signature:             db  0
+    .signature:             db  0x29
     .volume_id:             dd  0
-    .volume_label: times 11 db  0
-    .system_id:             dq  0
+    .volume_label:          db  "MBRDOS     "
+    .system_id:             db  "FAT12   "
 
     global _start
 _start:
@@ -64,98 +64,20 @@ _start:
     xor     al, al
     rep     stosb
 
-    mov     si, welcome
-    mov     cx, welcome.end - welcome
-    call    serial_send
+    ;; mov     si, welcome
+    ;; mov     cx, welcome.end - welcome
+    ;; call    serial_send
 
 halt:
     hlt
     jmp     halt
 
 
-;;; SERIAL I/O
-
-%define SERIAL(n)   (0x3f8 + n)
-
-;;; Send a single character over the default serial port.
-;;; Inputs: character to send in al.
-serial_sendchar:
-    cmp     al, `\n`
-    jne     .not_newline
-    mov     al, `\r`
-    call    .not_newline
-    mov     al, `\n`
-.not_newline:
-    push    dx
-    push    ax
-    mov     dx, SERIAL(5)
-.wait_thre:
-    in      al, dx
-    test    al, 0x20
-    jz      .wait_thre
-    pop     ax
-    mov     dx, SERIAL(0)
-    out     dx, al
-    pop     dx
-    ret
-
-;;; Send a string over the default serial port.
-;;;
-;;; Inputs: address of string in si
-;;;         length to send in cx
-serial_send:
-    lodsb
-    call    serial_sendchar
-    dec     cx
-    jnz     serial_send
-.end:
-    ret
-
-;;; Recieve a single character over the default serial port.
-;;; Outputs: character received in al
-serial_recvchar:
-    push    dx
-    mov     dx, SERIAL(5)
-.wait_dr:
-    in      al, dx
-    test    al, 1
-    jz      .wait_dr
-    mov     dx, SERIAL(0)
-    in      al, dx
-    pop     dx
-    ret
-
-;;; Recieve a string over the default serial port.
-;;; String terminated by either newline or specified limit.
-;;; A null byte is written either way.
-;;;
-;;; Inputs: address to write string to in di
-;;; Outputs: number of characters actually read (not counting null) in cx
-serial_recv:
-    push    ax
-    push    cx
-.loop:
-    call    serial_recvchar
-    cmp     al, `\r`
-    je      .loop               ; CR is completely ignored
-    cmp     al, `\n`
-    je      .end
-    stosb
-    dec     cx
-    jnz     .loop
-.end:
-    pop     ax                  ; Original max count
-    neg     cx                  ; cx = -(remaining count)
-    add     cx, ax              ; cx = count actually read
-    mov     byte [di], 0        ; null terminator
-    pop     ax
-    ret
-
 ;;; FLOPPY DISK DRIVER
 
 %define HEADS       2
 %define CYLINDERS   80
-%define SPC         18
+%define SPC         18          ; cylinders per sector
 
 ;;; Convert logical block address to cylinder/head/sector address.
 ;;; Since this is a floppy, we can assume that the cylinder number fits into
@@ -234,86 +156,90 @@ fat_cclus:  resw 1
 ;;; Outputs: ax = 0 on success, 1 on disk failure
 ;;;          cx = number of bytes actually read
 fat_read:
-    push    ax                  ; 1
-    push    dx                  ; 2
-    push    si                  ; 3
-
-    ;; Compute the number of bytes per cluster.
-    ;; TODO: maybe we should hardcode these to save instructions?
-    xor     ah, ah
-    mov     al, byte [bpb.sectors_per_cluster]
-    mul     word [bpb.bytes_per_sector]
+    push    dx
+    push    si
+    push    word [bx+fat_pos]
 
     ;; Compute the current offset into the current cluster
-    push    cx                  ; 4
-    mov     cx, ax
+    push    cx
+    mov     cx, 512
     mov     ax, [bx+fat_pos]
     div     cx
     mov     si, dx
 
     ;; Convert the bytes into full clusters and remaining bytes.
-    pop     ax                  ; 3 - Argument originally passed in cx
+    pop     ax                  ; argument originally passed in cx
     xor     dx, dx
     div     cx
-    push    dx                  ; 4
+    push    dx
     mov     cx, ax
+    inc     cx                  ; include last partial cluster
 
     mov     ax, [bx+fat_cclus]
 
 ;;; ax = number of cluster to read
-;;; cx = number of clusters remaining
+;;; cx = number of clusters remaining (including last partial one)
 ;;; si = byte offset into cluster to start reading
+;;; dx = number of bytes to read from last cluster
 .read_cluster:
+    cmp     ax, 0xff8
+    jge     .success            ; EOF was reached
+
+    push    ax
+    push    cx
+    cmp     cx, 1
+    mov     cx, dx
+    je      .use_last_cluster_bytes
+    mov     cx, 512
+    sub     cx, si
+.use_last_cluster_bytes:
+    ;; If we are almost at the end of the file, don't read a whole cluster
+    push    dx
+    mov     dx, [bx+fat_size]
+    sub     dx, [bx+fat_pos]
+    cmp     dx, cx
+    jb      .use_full_count
+    mov     cx, dx
+.use_full_count:
+    pop     dx
+
+    ;; If final count is zero, end.
+    ;; This should never happen; we should have hit EOF marker in FAT.
     test    cx, cx
-    jz      .read_last_cluster
+    jz      .success            ; TODO: is this really a success condition?
 
     call    fat_read_cluster
+    test    ax, ax              ; abort if error
+    jnz     .end
 
-    ;; Prepare for next iteration of outer (cluster) loop
-    pop     cx                  ; 5 - Number of clusters remaining
-    pop     ax                  ; 4 - Cluster number
+    xor     si, si              ; will be zero on non-initial clusters
+    pop     cx                  ; Number of clusters remaining
+    pop     ax                  ; Cluster number
     call    fat_next_cluster
+    mov     [bx+fat_cclus], ax
     dec     cx
-    jmp     .read_cluster
+    jnz     .read_cluster
 
-.read_last_cluster:
-
-fat_read_cluster:
-    ;; Compute the sector offset into the current cluster
-    ;; and byte offset into that sector.
-    push    ax                  ; 5
-    mov     ax, si
-    xor     dx, dx
-    div     word [bpb.bytes_per_sector]
-    mov     si, dx
-    mov     dx, ax
-
-    ;; Convert cluster number + offset to (LBA) sector number
-    ;; dx = offset in sectors
-    pop     ax                  ; 4 - Cluster number
-    push    ax                  ; 5
-    push    dx                  ; 6
-    mul     word [bpb.sectors_per_cluster]
-    pop     dx                  ; 5
-    add     ax, [bpb.reserved_sectors]
-    ;; add     ax, [bpb.hidden_sectors]
-    add     ax, dx
-
-    ;; Compute number of sectors to read.
-    push    cx                  ; 6
-    mov     cx, [bpb.sectors_per_cluster]
-    sub     cx, dx
-
-.read_sector:
-    call    fat_read_sector
-
-    xor     si, si              ; On subsequent sectors, offset will def be 0
-    dec     cx
-    jnz     .read_sector
+.success:
+    xor     ax, ax
+.end:
+    pop     cx                  ; initial fat_pos
+    sub     cx, [bx+fat_pos]
+    neg     cx
+    pop     si
+    pop     dx
     ret
 
-fat_read_sector:
+
+;;; Read a single FAT cluster (which should be 1 sector) or a portion thereof.
+;;;
+;;; Inputs:  ax = cluster number (not sector number)
+;;;          si = offset into cluster to start reading
+;;;          cx = total bytes to read
+;;; Outputs: ax = 0 on success or error code
+fat_read_cluster:
     ;; Read whole sector into temporary buffer
+    add     ax, [bpb.reserved_sectors]
     push    es                  ; 7
     push    di                  ; 8
     xor     di, di
@@ -322,17 +248,59 @@ fat_read_sector:
     call    read_sector
     pop     di                  ; 7
     pop     es                  ; 6
+    test    ax, ax
+    jnz     .end
 
     ;; Copy from temporary buffer into destination, w/ byte offset
-    push    cx                  ; 7
     add     si, sector_buf
-    mov     cx, sector_buf + 512
-    sub     cx, si
     rep     movsb
-    pop     cx                  ; 6
+    add     [bx+fat_pos], cx
+.end:
     ret
 
+;;; Given a FAT cluster number, use the FAT to find the next cluster.
+;;;
+;;; Inputs:  ax = current cluster
+;;; Outputs: ax = next cluster
 fat_next_cluster:
+    push    cx
+    push    dx
+    push    ax
+    mov     cx, 2
+    xor     dx, dx
+    div     cx
+    pop     cx
+    add     ax, cx              ; ax = byte offset of current cluster in FAT
+    push    dx                  ; dx = parity of cluster number
+    xor     dx, dx
+    mov     cx, 512
+    div     cx                  ; ax = sector number
+    mov     si, dx              ; si = byte offset
+    add     ax, [bpb.reserved_sectors]
+
+    push    es
+    push    di
+    xor     di, di
+    mov     es, di
+    mov     di, sector_buf
+    call    read_sector
+    pop     di
+    pop     es
+
+    mov     ax, [sector_buf+si]
+    pop     dx
+    test    dx, dx
+    jz      .even
+.odd:
+    xor     dx, dx
+    mov     cx, 16
+    div     cx
+    jmp     .end
+.even:
+    and     ax, 0xfff
+.end:
+    pop     dx
+    pop     cx
     ret
 
 ;;; DATA
