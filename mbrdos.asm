@@ -6,7 +6,7 @@
 ;;;
 
     bits 16
-    cpu 8086
+    cpu 386
 
     org 0x600
 
@@ -63,6 +63,8 @@ _start:
     mov     cx, (__bss_end - __bss_start)
     xor     al, al
     rep     stosb
+
+    shr     ax, 9
 
     ;; mov     si, welcome
     ;; mov     cx, welcome.end - welcome
@@ -161,18 +163,14 @@ fat_read:
     push    word [bx+fat_pos]
 
     ;; Compute the current offset into the current cluster
-    push    cx
-    mov     cx, 512
-    mov     ax, [bx+fat_pos]
-    div     cx
-    mov     si, dx
+    mov     si, [bx+fat_pos]
+    and     si, 511
 
     ;; Convert the bytes into full clusters and remaining bytes.
-    pop     ax                  ; argument originally passed in cx
-    xor     dx, dx
-    div     cx
+    mov     dx, cx
+    shr     cx, 9
+    and     dx, 511
     push    dx
-    mov     cx, ax
     inc     cx                  ; include last partial cluster
 
     mov     ax, [bx+fat_cclus]
@@ -265,17 +263,13 @@ fat_read_cluster:
 fat_next_cluster:
     push    cx
     push    dx
-    push    ax
-    mov     cx, 2
-    xor     dx, dx
-    div     cx
-    pop     cx
+    mov     cx, ax
+    shr     ax, 1
     add     ax, cx              ; ax = byte offset of current cluster in FAT
-    push    dx                  ; dx = parity of cluster number
-    xor     dx, dx
-    mov     cx, 512
-    div     cx                  ; ax = sector number
-    mov     si, dx              ; si = byte offset
+    mov     ax, cx
+    mov     si, cx
+    shr     ax, 9
+    and     si, 511
     add     ax, [bpb.reserved_sectors]
 
     push    es
@@ -292,9 +286,7 @@ fat_next_cluster:
     test    dx, dx
     jz      .even
 .odd:
-    xor     dx, dx
-    mov     cx, 16
-    div     cx
+    shr     ax, 4
     jmp     .end
 .even:
     and     ax, 0xfff
@@ -303,11 +295,102 @@ fat_next_cluster:
     pop     cx
     ret
 
-;;; DATA
+;;; INTERRUPTS AND SYSTEM CALLS
 
-welcome:
-    db `Welcome to MBR-DOS v0.1.0\n`
-.end:
+ivt_init:
+    mov     word [0x80*4], handle_dispatch
+    mov     word [0x80*4+2], 0
+    ret
+
+    struc   proc_handle
+hnd_ptr:    resw 1
+hnd_seg:    resw 1
+hnd_rindex: resw 1
+_reserved:  resw 1
+hnd_size:
+    endstruc
+
+handle_dispatch:
+    cmp     ax, 0x100
+    jge     invalid_handle
+    push    bx
+    mov     bx, 8
+    push    dx
+    xor     dx, dx
+    mul     bx
+    pop     dx
+    mov     bx, ax
+    cmp     word [bx], 0
+    je      invalid_handle
+    mov     ax, [bx+hnd_rindex]
+    ;; TODO: push floating-point registers
+    call    far [bx]
+    pop     bx
+    iret
+
+invalid_handle:
+    xor     ax, ax
+    dec     ax
+    iret
+
+;;; FUNCTIONS FOR USER PROCESSES
+
+;;; The initial list of handles for a process looks like this:
+;;; [0] read standard input (inherited from parent)
+;;; [1] write standard output (inherited)
+;;; [2] write standard error (inherited)
+;;; [3] read working directory (inherited)
+;;; [4] open from working directory (inherited)
+;;; [5] exit
+;;; [6] fork
+;;; [7] create handle
+
+proc_new:
+    push    di
+
+    xor     di, di
+.search:
+    inc     di
+    cmp     byte [used_pids+di], 0
+    je      .search
+    ;; di = pid of new process
+    inc     byte [used_pids-1+di]
+    push    di
+    mov     ax, 0x1000
+    xor     dx, dx
+    mul     di
+    mov     es, ax
+    xor     di, di
+    mov     cx, 0x100
+    xor     al, al
+    rep     stosb
+
+    ;; handles 0-4 will be inherited from the parent,
+    ;; or created specially for PID 1.
+    mov     di, 7*hnd_size
+
+    mov     word [es:di+hnd_ptr], proc_exit
+    mov     word [es:di+hnd_seg], 0
+    add     di, 8
+
+    mov     word [es:di+hnd_ptr], proc_fork
+    mov     word [es:di+hnd_seg], 0
+    add     di, 8
+
+    mov     word [es:di+hnd_ptr], proc_create_handle
+    mov     word [di+hnd_seg], 0
+    add     di, 8
+
+proc_exit:
+    ret
+
+proc_fork:
+    ret
+
+proc_create_handle:
+    ret
+
+;;; DATA
 
 ;;; MBR PADDING AND SIGNATURE
 
@@ -319,5 +402,7 @@ welcome:
 __bss_start:
 
 sector_buf: resb 512
+
+used_pids:  resb 9
 
 __bss_end:
