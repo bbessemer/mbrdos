@@ -23,10 +23,7 @@ _start:
 
     ;; Relocate ourselves to 0x0:0x600 from wherever we are
     ;; (doesn't have to be 0x7c00)
-    call    .testaddr
-.testaddr:
-    pop     si
-    sub     si, (.testaddr - _start)
+    mov     si, 0x7c00
     push    ds
     mov     ax, cs
     mov     ds, ax
@@ -40,8 +37,6 @@ _start:
     mov     cx, (__bss_end - __bss_start)
     xor     al, al
     rep     stosb
-
-    shr     ax, 9
 
     ;; mov     si, welcome
     ;; mov     cx, welcome.end - welcome
@@ -119,184 +114,6 @@ read_sector:
     ret
 
 
-;;; TAR DRIVER
-
-    struc   tarfile
-tar_fsize:  resw 1
-tar_pos:    resw 1
-tar_stsec:  resw 1
-tar_flags:  resw 1
-tar_size:
-    endstruc
-
-    %define TAR_DIRECTORY   1
-
-;;; Only supporting the original tar format, not USTAR
-    struc   tar_header
-th_name:    resb 100
-th_mode:    resb 8
-th_uid:     resb 8
-th_gid:     resb 8
-th_fsize:   resb 12
-th_mtime:   resb 12
-th_cksum:   resb 8
-th_type:    resb 1
-th_lnknam:  resb 100
-th_size:
-    endstruc
-
-;;; Convert ASCII octal string to number
-;;;
-;;; Inputs:  pointer to null-terminated string in si
-;;; Outputs: value in cx
-atoi_octal:
-    push    ax
-    xor     cx, cx
-    xor     ax, ax
-.read:
-    lodsb
-    test    al, al
-    jz      .end
-    shl     cx, 3
-    add     cx, ax
-    jmp     .read
-.end:
-    pop     ax
-    ret
-
-;;; Read bytes from a file in a tarball on disk
-;;;
-;;; Inputs:  bx = pointer to tarfile struct
-;;;          cx = number of bytes to read
-;;;          es:di = location to read to
-;;; Outputs: ax = 0 on success or error code
-;;;          cx = number of bytes actually read
-tar_read_internal:
-    push    dx
-    push    si
-    mov     ax, [bx+tar_pos]
-    mov     dx, [bx+tar_size]
-    sub     dx, ax
-    cmp     dx, cx
-    jl      .expect_eof
-    mov     dx, cx
-.expect_eof:
-    push    dx
-    mov     si, ax
-    shr     ax, 9
-    and     si, 511
-.read_loop:
-    test    dx, dx
-    jz      .success
-    push    es
-    push    di
-    xor     di, di
-    mov     es, di
-    mov     di, sector_buf
-    push    ax
-    call    read_sector
-    test    ax, ax
-    jnz     .end
-    pop     ax
-    pop     di
-    pop     es
-
-    mov     cx, 512
-    sub     cx, si
-    cmp     cx, dx
-    jge     .read_full_sector
-    mov     cx, dx
-.read_full_sector:
-    add     si, sector_buf
-    rep     movsb
-
-    inc     ax
-    sub     dx, cx
-    ja      .read_loop
-.success:
-    xor     ax, ax
-.end:
-    pop     cx
-    sub     cx, dx
-    pop     si
-    pop     dx
-    ret
-
-tar_read:
-    push    dx
-    push    bx
-    mov     bx, tar_size
-    mul     bx
-    mov     bx, ax
-    add     bx, tarfiles
-    call    tar_read_internal
-    pop     bx
-    pop     dx
-    retf
-
-tar_open_internal:
-    push    es
-    push    di
-    push    cx
-    xor     ax, ax
-    mov     bx, tarfiles
-.search_space:
-    cmp     bx, tarfiles.end
-    jge     .fail
-    cmp     word [bx+tar_stsec], 0
-    je      .found_space
-    add     bx, tar_size
-    jmp     .search_space
-.found_space:
-    push    ax
-    xor     di, di
-    mov     es, di
-    mov     ax, 1
-.search_file:
-    mov     di, sector_buf
-    push    ax
-    call    read_sector
-    test    ax, ax
-    jnz     .fail
-    pop     ax
-    mov     cx, 100
-    repe    cmpsb
-    je      .found_file
-    call    tar_get_size
-    add     ax, cx
-    cmp     ax, 2880            ; TODO this is super inefficient
-    jge     .fail
-    jmp     .search_file
-.found_file:
-    call    tar_get_size
-    mov     [bx+tar_fsize], cx
-    mov     [bx+tar_stsec], ax
-    mov     [bx+tar_pos], word 0
-    mov     [bx+tar_flags], word 0
-    cmp     [sector_buf+th_type], byte "5"
-    jne     .notdir
-    or      [bx+tar_flags], word TAR_DIRECTORY
-.notdir:
-    pop     ax
-    jmp     .success
-.fail:
-    xor     ax, ax
-    dec     ax
-.success:
-    pop     di
-    pop     es
-    ret
-
-tar_get_size:
-    push    ds
-    push    si
-    xor     si, si
-    mov     ds, si
-    mov     si, sector_buf+th_fsize
-    call    atoi_octal
-    pop     si
-    pop     ds
-    ret
 
 ;;; INTERRUPTS AND SYSTEM CALLS
 
@@ -446,8 +263,5 @@ __bss_start:
 sector_buf: resb 512
 
 used_pids:  resb 9
-
-tarfiles:   resb 256 * tar_size
-    .end:
 
 __bss_end:
