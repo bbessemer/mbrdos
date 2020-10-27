@@ -12,29 +12,6 @@
 
     section .text
 
-bpb:
-    jmp     _start
-    nop
-    .oem_id:                db  "MBRDOS01"
-    .bytes_per_sector:      dw  512
-    .sectors_per_cluster:   db  1
-    .reserved_sectors:      dw  1
-    .num_fats:              db  2
-    .rootdir_entries:       dw  0xe0
-    .total_sectors:         dw  2880
-    .media_desc_type:       db  0xf0
-    .sectors_per_fat:       dw  9
-    .sectors_per_track:     dw  18
-    .num_heads:             dw  2
-    .hidden_sectors:        dd  0
-    .large_sector_count:    dd  0
-    .drive_number:          db  0
-    .nt_flags:              db  0
-    .signature:             db  0x29
-    .volume_id:             dd  0
-    .volume_label:          db  "MBRDOS     "
-    .system_id:             db  "FAT12   "
-
     global _start
 _start:
     cli
@@ -49,11 +26,11 @@ _start:
     call    .testaddr
 .testaddr:
     pop     si
-    sub     si, (.testaddr - bpb)
+    sub     si, (.testaddr - _start)
     push    ds
     mov     ax, cs
     mov     ds, ax
-    mov     di, bpb
+    mov     di, _start
     mov     cx, 512
     rep     movsb
     jmp     0x0:.zero_bss
@@ -100,6 +77,7 @@ lba2chs:
     mov     ch, ah
     mov     dh, al
     mov     cl, dl
+    inc     cl
     ret
 
 ;;; Read several sectors from the first floppy disk.
@@ -140,158 +118,184 @@ read_sector:
     pop     bx
     ret
 
-;;; FAT12 DRIVER
 
-    struc   fatfile
-fat_size:   resw 1
-fat_pos:    resw 1
-fat_sclus:  resw 1
-fat_cclus:  resw 1
+;;; TAR DRIVER
+
+    struc   tarfile
+tar_fsize:  resw 1
+tar_pos:    resw 1
+tar_stsec:  resw 1
+tar_flags:  resw 1
+tar_size:
     endstruc
 
-;;; Read bytes from a FAT file.
+    %define TAR_DIRECTORY   1
+
+;;; Only supporting the original tar format, not USTAR
+    struc   tar_header
+th_name:    resb 100
+th_mode:    resb 8
+th_uid:     resb 8
+th_gid:     resb 8
+th_fsize:   resb 12
+th_mtime:   resb 12
+th_cksum:   resb 8
+th_type:    resb 1
+th_lnknam:  resb 100
+th_size:
+    endstruc
+
+;;; Convert ASCII octal string to number
 ;;;
-;;; Inputs:  pointer to fatfile structure in bx
-;;;          number of bytes to read in cx
-;;;          destination buffer at [es:di]
-;;; Outputs: ax = 0 on success, 1 on disk failure
+;;; Inputs:  pointer to null-terminated string in si
+;;; Outputs: value in cx
+atoi_octal:
+    push    ax
+    xor     cx, cx
+    xor     ax, ax
+.read:
+    lodsb
+    test    al, al
+    jz      .end
+    shl     cx, 3
+    add     cx, ax
+    jmp     .read
+.end:
+    pop     ax
+    ret
+
+;;; Read bytes from a file in a tarball on disk
+;;;
+;;; Inputs:  bx = pointer to tarfile struct
+;;;          cx = number of bytes to read
+;;;          es:di = location to read to
+;;; Outputs: ax = 0 on success or error code
 ;;;          cx = number of bytes actually read
-fat_read:
+tar_read_internal:
     push    dx
     push    si
-    push    word [bx+fat_pos]
-
-    ;; Compute the current offset into the current cluster
-    mov     si, [bx+fat_pos]
-    and     si, 511
-
-    ;; Convert the bytes into full clusters and remaining bytes.
-    mov     dx, cx
-    shr     cx, 9
-    and     dx, 511
-    push    dx
-    inc     cx                  ; include last partial cluster
-
-    mov     ax, [bx+fat_cclus]
-
-;;; ax = number of cluster to read
-;;; cx = number of clusters remaining (including last partial one)
-;;; si = byte offset into cluster to start reading
-;;; dx = number of bytes to read from last cluster
-.read_cluster:
-    cmp     ax, 0xff8
-    jge     .success            ; EOF was reached
-
-    push    ax
-    push    cx
-    cmp     cx, 1
-    mov     cx, dx
-    je      .use_last_cluster_bytes
-    mov     cx, 512
-    sub     cx, si
-.use_last_cluster_bytes:
-    ;; If we are almost at the end of the file, don't read a whole cluster
-    push    dx
-    mov     dx, [bx+fat_size]
-    sub     dx, [bx+fat_pos]
+    mov     ax, [bx+tar_pos]
+    mov     dx, [bx+tar_size]
+    sub     dx, ax
     cmp     dx, cx
-    jb      .use_full_count
-    mov     cx, dx
-.use_full_count:
-    pop     dx
-
-    ;; If final count is zero, end.
-    ;; This should never happen; we should have hit EOF marker in FAT.
-    test    cx, cx
-    jz      .success            ; TODO: is this really a success condition?
-
-    call    fat_read_cluster
-    test    ax, ax              ; abort if error
-    jnz     .end
-
-    xor     si, si              ; will be zero on non-initial clusters
-    pop     cx                  ; Number of clusters remaining
-    pop     ax                  ; Cluster number
-    call    fat_next_cluster
-    mov     [bx+fat_cclus], ax
-    dec     cx
-    jnz     .read_cluster
-
-.success:
-    xor     ax, ax
-.end:
-    pop     cx                  ; initial fat_pos
-    sub     cx, [bx+fat_pos]
-    neg     cx
-    pop     si
-    pop     dx
-    ret
-
-
-;;; Read a single FAT cluster (which should be 1 sector) or a portion thereof.
-;;;
-;;; Inputs:  ax = cluster number (not sector number)
-;;;          si = offset into cluster to start reading
-;;;          cx = total bytes to read
-;;; Outputs: ax = 0 on success or error code
-fat_read_cluster:
-    ;; Read whole sector into temporary buffer
-    add     ax, [bpb.reserved_sectors]
-    push    es                  ; 7
-    push    di                  ; 8
-    xor     di, di
-    mov     es, di
-    mov     di, sector_buf
-    call    read_sector
-    pop     di                  ; 7
-    pop     es                  ; 6
-    test    ax, ax
-    jnz     .end
-
-    ;; Copy from temporary buffer into destination, w/ byte offset
-    add     si, sector_buf
-    rep     movsb
-    add     [bx+fat_pos], cx
-.end:
-    ret
-
-;;; Given a FAT cluster number, use the FAT to find the next cluster.
-;;;
-;;; Inputs:  ax = current cluster
-;;; Outputs: ax = next cluster
-fat_next_cluster:
-    push    cx
+    jl      .expect_eof
+    mov     dx, cx
+.expect_eof:
     push    dx
-    mov     cx, ax
-    shr     ax, 1
-    add     ax, cx              ; ax = byte offset of current cluster in FAT
-    mov     ax, cx
-    mov     si, cx
+    mov     si, ax
     shr     ax, 9
     and     si, 511
-    add     ax, [bpb.reserved_sectors]
-
+.read_loop:
+    test    dx, dx
+    jz      .success
     push    es
     push    di
     xor     di, di
     mov     es, di
     mov     di, sector_buf
+    push    ax
     call    read_sector
+    test    ax, ax
+    jnz     .end
+    pop     ax
     pop     di
     pop     es
 
-    mov     ax, [sector_buf+si]
-    pop     dx
-    test    dx, dx
-    jz      .even
-.odd:
-    shr     ax, 4
-    jmp     .end
-.even:
-    and     ax, 0xfff
+    mov     cx, 512
+    sub     cx, si
+    cmp     cx, dx
+    jge     .read_full_sector
+    mov     cx, dx
+.read_full_sector:
+    add     si, sector_buf
+    rep     movsb
+
+    inc     ax
+    sub     dx, cx
+    ja      .read_loop
+.success:
+    xor     ax, ax
 .end:
-    pop     dx
     pop     cx
+    sub     cx, dx
+    pop     si
+    pop     dx
+    ret
+
+tar_read:
+    push    dx
+    push    bx
+    mov     bx, tar_size
+    mul     bx
+    mov     bx, ax
+    add     bx, tarfiles
+    call    tar_read_internal
+    pop     bx
+    pop     dx
+    retf
+
+tar_open_internal:
+    push    es
+    push    di
+    push    cx
+    xor     ax, ax
+    mov     bx, tarfiles
+.search_space:
+    cmp     bx, tarfiles.end
+    jge     .fail
+    cmp     word [bx+tar_stsec], 0
+    je      .found_space
+    add     bx, tar_size
+    jmp     .search_space
+.found_space:
+    push    ax
+    xor     di, di
+    mov     es, di
+    mov     ax, 1
+.search_file:
+    mov     di, sector_buf
+    push    ax
+    call    read_sector
+    test    ax, ax
+    jnz     .fail
+    pop     ax
+    mov     cx, 100
+    repe    cmpsb
+    je      .found_file
+    call    tar_get_size
+    add     ax, cx
+    cmp     ax, 2880            ; TODO this is super inefficient
+    jge     .fail
+    jmp     .search_file
+.found_file:
+    call    tar_get_size
+    mov     [bx+tar_fsize], cx
+    mov     [bx+tar_stsec], ax
+    mov     [bx+tar_pos], word 0
+    mov     [bx+tar_flags], word 0
+    cmp     [sector_buf+th_type], byte "5"
+    jne     .notdir
+    or      [bx+tar_flags], word TAR_DIRECTORY
+.notdir:
+    pop     ax
+    jmp     .success
+.fail:
+    xor     ax, ax
+    dec     ax
+.success:
+    pop     di
+    pop     es
+    ret
+
+tar_get_size:
+    push    ds
+    push    si
+    xor     si, si
+    mov     ds, si
+    mov     si, sector_buf+th_fsize
+    call    atoi_octal
+    pop     si
+    pop     ds
     ret
 
 ;;; INTERRUPTS AND SYSTEM CALLS
@@ -442,5 +446,8 @@ __bss_start:
 sector_buf: resb 512
 
 used_pids:  resb 9
+
+tarfiles:   resb 256 * tar_size
+    .end:
 
 __bss_end:
