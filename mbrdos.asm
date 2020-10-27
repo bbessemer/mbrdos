@@ -89,15 +89,14 @@ halt:
 ;;; Outputs: cylinder in ch
 ;;;          head in dh
 ;;;          sector in cl
+;;;          dl destroyed
 lba2chs:
-    push    dx
     mov     cl, SPC
     div     cl                  ; ah = sector
     mov     dl, ah
     xor     ah, ah
     mov     cl, HEADS
     div     cl                  ; ah = cylinder; al = head
-    pop     dx
     mov     ch, ah
     mov     dh, al
     mov     cl, dl
@@ -336,59 +335,98 @@ invalid_handle:
 ;;; FUNCTIONS FOR USER PROCESSES
 
 ;;; The initial list of handles for a process looks like this:
-;;; [0] read standard input (inherited from parent)
-;;; [1] write standard output (inherited)
-;;; [2] write standard error (inherited)
-;;; [3] read working directory (inherited)
-;;; [4] open from working directory (inherited)
-;;; [5] exit
-;;; [6] fork
-;;; [7] create handle
+;;; [0] exit
+;;; [1] fork
+;;; [2] create handle
+;;; [3] transfer handle
+;;;
+;;; PID 1 will additionally get these (which will be inherited)
+;;; [4] read working directory
+;;; [5] open from working directory
 
-proc_new:
+;;; TODO: this returns to the calling process and probably should not be used
+proc_exit:
+    push    si
+    mov     si, cs
+    shr     si, 12
+    dec     byte [used_pids+si]
+    pop     si
+    retf
+
+;;; Kernel capability. Clones the calling process.
+;;;
+;;; Inputs:  dx = start address in new process
+;;; Outputs: ax = handle to entry point of new process
+proc_fork:
+    push    cx
     push    di
+
+    xor     ax, ax              ; Preload failure value
+    dec     ax
 
     xor     di, di
 .search:
     inc     di
+    cmp     di, 9
+    jg      .end
     cmp     byte [used_pids+di], 0
     je      .search
     ;; di = pid of new process
-    inc     byte [used_pids-1+di]
     push    di
-    mov     ax, 0x1000
-    xor     dx, dx
-    mul     di
-    mov     es, ax
+    inc     byte [used_pids-1+di]
+    shl     di, 12
+    mov     es, di
+
+    ;; Copy the old process's memory into the new process's space
     xor     di, di
-    mov     cx, 0x100
-    xor     al, al
-    rep     stosb
+    xor     si, si
+    mov     cx, -1
+    rep     movsb
 
-    ;; handles 0-4 will be inherited from the parent,
-    ;; or created specially for PID 1.
-    mov     di, 7*hnd_size
+    pop     di
+    mov     si, ds
+    shr     si, 12
+    call    proc_make_handle_internal
+.end:
+    pop     di
+    pop     cx
+    retf
 
-    mov     word [es:di+hnd_ptr], proc_exit
-    mov     word [es:di+hnd_seg], 0
-    add     di, 8
+proc_make_handle:
+    call    proc_make_handle_internal
+    retf
 
-    mov     word [es:di+hnd_ptr], proc_fork
-    mov     word [es:di+hnd_seg], 0
-    add     di, 8
-
-    mov     word [es:di+hnd_ptr], proc_create_handle
-    mov     word [di+hnd_seg], 0
-    add     di, 8
-
-proc_exit:
+;;; Inputs:  si = process to which handle should refer
+;;;          di = process to which to give handle
+;;;          dx = entry point
+;;; Outputs: ax = new handle, or -1 on failure
+proc_make_handle_internal:
+    shl     si, 12
+    shl     di, 12
+    push    es
+    mov     es, di
+    xor     di, di
+    xor     ax, ax
+    dec     ax
+.search:
+    cmp     di, 0x100
+    jge     .end
+    cmp     word [di+hnd_ptr], 0
+    je      .found
+    add     di, hnd_size
+    jmp     .search
+.found:
+    mov     [di+hnd_ptr], dx
+    mov     [di+hnd_seg], si
+    mov     word [di+hnd_rindex], 0
+    mov     ax, di
+    shr     ax, 12
+.end:
+    pop     es
     ret
 
-proc_fork:
-    ret
-
-proc_create_handle:
-    ret
+proc_give_handle:
+    retf
 
 ;;; DATA
 
